@@ -1,5 +1,10 @@
 package com.bmsedge.device.controller;
 
+import com.bmsedge.device.dto.CounterTrendResponse;
+import com.bmsedge.device.model.CounterSessionAnalytics;
+import com.bmsedge.device.client.MqttAggregationClient;
+import com.bmsedge.device.dto.CounterTrendResponse;
+import com.bmsedge.device.dto.MqttAggregationDTO;
 import com.bmsedge.device.service.CounterAnalyticsService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -8,8 +13,12 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import com.bmsedge.device.service.LiveCounterStatusService;
+import com.bmsedge.device.repository.CounterSessionAnalyticsRepository;
 
+import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.time.temporal.ChronoUnit;
 import java.util.*;
 
 /**
@@ -26,6 +35,12 @@ public class CounterAnalyticsController {
     private final CounterAnalyticsService counterAnalyticsService;
 
     private final LiveCounterStatusService liveCounterStatusService;
+
+    private final MqttAggregationClient mqttAggregationClient;
+
+
+
+    private final CounterSessionAnalyticsRepository  counterSessionAnalyticsRepository;
 
     /**
      * Get queue trends for a specific counter
@@ -61,12 +76,13 @@ public class CounterAnalyticsController {
                         .body(createErrorResponse("Counter code cannot be empty"));
             }
 
-            // Set default time range
-            if (endTime == null) {
-                endTime = LocalDateTime.now();
-            }
+            LocalDate today = LocalDate.now();
+
             if (startTime == null) {
-                startTime = endTime.minusHours(24);
+                startTime = today.atStartOfDay();
+            }
+            if (endTime == null) {
+                endTime = today.atTime(LocalTime.MAX);
             }
 
             if (startTime.isAfter(endTime)) {
@@ -392,64 +408,104 @@ public class CounterAnalyticsController {
      *
      * Returns time-series data aggregated by selected granularity
      */
-    @GetMapping("/counter/{counterCode}/historical-trends")
-    public ResponseEntity<?> getHistoricalQueueTrends(
+    @GetMapping("/{counterCode}/historical-trends")
+    public ResponseEntity<List<CounterTrendResponse>> getHistoricalTrends(
             @PathVariable String counterCode,
-            @RequestParam("startTime")
-            @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime startTime,
-            @RequestParam("endTime")
-            @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime endTime,
-            @RequestParam("granularity") String granularity) {
+            @RequestParam String periodType,
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate startDate,
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate endDate
+    ) {
+        LocalDateTime from = startDate.atStartOfDay();
+        LocalDateTime to = endDate.atTime(23, 59, 59);
 
-        log.info("Fetching historical trends: counter={}, granularity={}", counterCode, granularity);
-
-        // ---- Basic validation ----
-        if (counterCode == null || counterCode.trim().isEmpty()) {
-            return ResponseEntity.badRequest()
-                    .body(Map.of("error", "Counter code cannot be empty"));
-        }
-
-        if (startTime == null || endTime == null) {
-            return ResponseEntity.badRequest()
-                    .body(Map.of("error", "startTime and endTime are required"));
-        }
-
-        if (startTime.isAfter(endTime)) {
-            return ResponseEntity.badRequest()
-                    .body(Map.of("error", "startTime must be before endTime"));
-        }
-
-        Set<String> allowedGranularity = Set.of("hour", "day", "week", "month");
-        if (granularity == null || !allowedGranularity.contains(granularity.toLowerCase())) {
-            return ResponseEntity.badRequest()
-                    .body(Map.of(
-                            "error", "Invalid granularity",
-                            "allowed", allowedGranularity
-                    ));
-        }
-
-        try {
-            Map<String, Object> response =
-                    counterAnalyticsService.getHistoricalQueueTrends(
-                            counterCode.trim(),
-                            startTime,
-                            endTime,
-                            granularity.toLowerCase()
-                    );
-
-            return ResponseEntity.ok(response);
-
-        } catch (IllegalArgumentException e) {
-            log.warn("Validation error", e);
-            return ResponseEntity.badRequest()
-                    .body(Map.of("error", e.getMessage()));
-
-        } catch (Exception e) {
-            log.error("Unexpected error", e);
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(Map.of("error", "Failed to fetch historical trends"));
-        }
+        return ResponseEntity.ok(
+                counterAnalyticsService.getTrends(
+                        counterCode,
+                        periodType,
+                        from,
+                        to
+                )
+        );
     }
+
+//
+//    @GetMapping("/{counterCode}/analytics/trends")
+//    public ResponseEntity<List<CounterTrendResponse>> getCounterTrends(
+//            @PathVariable String counterCode,
+//            @RequestParam String periodType,
+//            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate startDate,
+//            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate endDate
+//    ) {
+//        log.info("📊 Fetching trends for counter: {}, period: {}, from: {} to: {}",
+//                counterCode, periodType, startDate, endDate);
+//
+//        List<CounterTrendResponse> response = new ArrayList<>();
+//
+//        if ("daily".equalsIgnoreCase(periodType)) {
+//            long daysBetween = ChronoUnit.DAYS.between(startDate, endDate) + 1;
+//
+//            for (long i = 0; i < daysBetween; i++) {
+//                LocalDate currentDate = startDate.plusDays(i);
+//
+//                // Call MQTT aggregation API for each day
+//                List<MqttAggregationDTO> dailyData =
+//                        mqttAggregationClient.fetchHourlyAggregation(currentDate);
+//
+//                // Filter by counterCode and sum the counts
+//                Long totalForDay = dailyData.stream()
+//                        .filter(dto -> dto.getCounterName().equals(counterCode))
+//                        .mapToLong(MqttAggregationDTO::getTotalCount)
+//                        .sum();
+//
+//                if (totalForDay > 0) {
+//                    response.add(new CounterTrendResponse(
+//                            currentDate.atStartOfDay(),
+//                            totalForDay
+//                    ));
+//                }
+//            }
+//
+//            log.info("✅ Returned {} daily trend records for counter: {}",
+//                    response.size(), counterCode);
+//
+//        } else if ("weekly".equalsIgnoreCase(periodType)) {
+//            // Implement weekly aggregation
+//            log.warn("⚠️ Weekly period type not yet implemented");
+//            throw new UnsupportedOperationException("Weekly aggregation not yet implemented");
+//
+//        } else if ("monthly".equalsIgnoreCase(periodType)) {
+//            // Implement monthly aggregation
+//            log.warn("⚠️ Monthly period type not yet implemented");
+//            throw new UnsupportedOperationException("Monthly aggregation not yet implemented");
+//
+//        } else {
+//            log.error("❌ Invalid periodType: {}", periodType);
+//            throw new IllegalArgumentException("Invalid periodType. Must be: daily, weekly, or monthly");
+//        }
+//
+//        return ResponseEntity.ok(response);
+//    }
+
+    @GetMapping("/{counterCode}/trends")
+    public ResponseEntity<List<CounterTrendResponse>> getCounterTrends(
+            @PathVariable String counterCode,
+            @RequestParam String periodType,
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate startDate,
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate endDate
+    ) {
+        return ResponseEntity.ok(
+                counterAnalyticsService.getTrends(
+                        counterCode,
+                        periodType,
+                        startDate.atStartOfDay(),
+                        endDate.atTime(23, 59, 59)
+                )
+        );
+    }
+
+
+
+
 
 
     /**
@@ -534,6 +590,97 @@ public class CounterAnalyticsController {
             log.error("Error fetching counters summary: {}", e.getMessage(), e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                     .body(createErrorResponse("Error fetching counters summary: " + e.getMessage()));
+        }
+    }
+
+    // Add this mapping at the top of your CounterAnalyticsController class (after the class declaration)
+
+    private static final Map<String, String> COUNTER_CODE_TO_MQTT_NAME = Map.of(
+            "CNT001", "pan_pacific",
+            "CNT002", "Mediterranean",
+            "CNT003", "Tandoor"
+            // Add more mappings as needed
+    );
+
+    /**
+     * Get weekly peak queue data for chart display
+     * GET /api/counter-analytics/{counterCode}/weekly-peak-queue
+     *
+     * Query params:
+     * - startDate: Start date (optional, defaults to 7 days ago)
+     * - endDate: End date (optional, defaults to today)
+     *
+     * Returns peak queue values for each day of the week
+     */
+    @GetMapping("/{counterCode}/weekly-peak-queue")
+    public ResponseEntity<?> getWeeklyPeakQueue(
+            @PathVariable String counterCode,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate startDate,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate endDate) {
+
+        try {
+            log.info("Fetching weekly peak queue for counter: {}", counterCode);
+
+            // Map counter code to MQTT name
+            String mqttCounterName = COUNTER_CODE_TO_MQTT_NAME.get(counterCode);
+            if (mqttCounterName == null) {
+                return ResponseEntity.badRequest()
+                        .body(createErrorResponse("Counter code not found: " + counterCode));
+            }
+
+            log.info("Mapped counter code {} to MQTT name: {}", counterCode, mqttCounterName);
+
+            // Set defaults: last 7 days if not provided
+            if (endDate == null) {
+                endDate = LocalDate.now();
+            }
+            if (startDate == null) {
+                startDate = endDate.minusDays(6);
+            }
+
+            List<Map<String, Object>> weeklyData = new ArrayList<>();
+
+            // Iterate through each date
+            LocalDate currentDate = startDate;
+            while (!currentDate.isAfter(endDate)) {
+                // Call MQTT aggregation API for the date
+                List<MqttAggregationDTO> dailyData = mqttAggregationClient.fetchHourlyAggregation(currentDate);
+
+                // Find data using MQTT counter name
+                Optional<MqttAggregationDTO> counterData = dailyData.stream()
+                        .filter(dto -> dto.getCounterName().equalsIgnoreCase(mqttCounterName))
+                        .findFirst();
+
+                if (counterData.isPresent()) {
+                    MqttAggregationDTO data = counterData.get();
+                    Map<String, Object> dayData = new HashMap<>();
+                    dayData.put("date", currentDate);
+                    dayData.put("dayName", currentDate.getDayOfWeek().toString());
+                    dayData.put("peakQueue", data.getPeakQueue());
+                    dayData.put("totalCount", data.getTotalCount());
+                    dayData.put("peakWaitTime", data.getPeakWaitTime());
+                    dayData.put("congestionIndex", data.getCongestionIndex());
+                    dayData.put("peakCongestion", data.getPeakCongestion());
+                    dayData.put("periodStart", data.getPeriodStart());
+                    weeklyData.add(dayData);
+                }
+
+                currentDate = currentDate.plusDays(1);
+            }
+
+            Map<String, Object> response = new HashMap<>();
+            response.put("counterCode", counterCode);
+            response.put("startDate", startDate);
+            response.put("endDate", endDate);
+            response.put("data", weeklyData);
+
+            log.info("Successfully fetched {} days of peak queue data for: {}", weeklyData.size(), counterCode);
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            log.error("Error fetching weekly peak queue: {}", e.getMessage(), e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(createErrorResponse("Error fetching weekly peak queue: " + e.getMessage()));
         }
     }
 

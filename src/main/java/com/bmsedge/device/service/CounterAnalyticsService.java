@@ -1,8 +1,13 @@
 package com.bmsedge.device.service;
 
+import com.bmsedge.device.client.MqttAggregationClient;
+import com.bmsedge.device.dto.CounterTrendDto;
+import com.bmsedge.device.dto.CounterTrendResponse;
+import com.bmsedge.device.dto.MqttAggregationDTO;
 import com.bmsedge.device.model.Counter;
 import com.bmsedge.device.model.Device;
 import com.bmsedge.device.repository.CounterRepository;
+import com.bmsedge.device.repository.CounterSessionAnalyticsRepository;
 import com.bmsedge.device.repository.DeviceRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -10,7 +15,10 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
+import java.time.DayOfWeek;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.YearMonth;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
@@ -31,6 +39,8 @@ public class CounterAnalyticsService {
     private final DeviceRepository deviceRepository;
     private final CounterRepository counterRepository;
     private final RestTemplate restTemplate;
+    private final CounterSessionAnalyticsRepository repository;
+    private final MqttAggregationClient mqttAggregationClient;
 
     @Value("${mqtt.api.base-url:http://localhost:8090}")
     private String mqttApiBaseUrl;
@@ -1034,6 +1044,89 @@ public class CounterAnalyticsService {
     private double roundToOneDecimal(double value) {
         return Math.round(value * 10.0) / 10.0;
     }
+    public List<CounterTrendResponse> getTrends(
+            String counterCode,
+            String periodType,
+            LocalDateTime from,
+            LocalDateTime to
+    ) {
+
+        // 🔥 SINGLE MQTT CALL
+        List<MqttAggregationDTO> mqttData =
+                mqttAggregationClient.fetchHourlyAggregation(from, to);
+
+        List<MqttAggregationDTO> counterData = mqttData.stream()
+                .filter(d -> d.getCounterName().equalsIgnoreCase(counterCode))
+                .toList();
+
+        return switch (periodType.toLowerCase()) {
+            case "daily" -> aggregateDaily(counterData);
+            case "weekly" -> aggregateWeekly(counterData);
+            case "monthly" -> aggregateMonthly(counterData);
+            default -> throw new IllegalArgumentException(
+                    "periodType must be daily / weekly / monthly"
+            );
+        };
+    }
+
+    private List<CounterTrendResponse> aggregateDaily(
+            List<MqttAggregationDTO> data
+    ) {
+        return data.stream()
+                .collect(Collectors.groupingBy(
+                        d -> d.getPeriodStart().toLocalDate(),
+                        Collectors.summingLong(MqttAggregationDTO::getTotalCount)
+                ))
+                .entrySet()
+                .stream()
+                .map(e -> new CounterTrendResponse(
+                        e.getKey().atStartOfDay(),
+                        e.getValue()
+                ))
+                .toList();
+    }
+
+    private List<CounterTrendResponse> aggregateWeekly(
+            List<MqttAggregationDTO> data
+    ) {
+        return data.stream()
+                .collect(Collectors.groupingBy(
+                        d -> d.getPeriodStart()
+                                .toLocalDate()
+                                .with(DayOfWeek.MONDAY),
+                        Collectors.summingLong(MqttAggregationDTO::getTotalCount)
+                ))
+                .entrySet()
+                .stream()
+                .map(e -> new CounterTrendResponse(
+                        e.getKey().atStartOfDay(),
+                        e.getValue()
+                ))
+                .toList();
+    }
+
+    private List<CounterTrendResponse> aggregateMonthly(
+            List<MqttAggregationDTO> data
+    ) {
+        return data.stream()
+                .collect(Collectors.groupingBy(
+                        d -> YearMonth.from(d.getPeriodStart()),
+                        Collectors.summingLong(MqttAggregationDTO::getTotalCount)
+                ))
+                .entrySet()
+                .stream()
+                .map(e -> new CounterTrendResponse(
+                        e.getKey().atDay(1).atStartOfDay(),
+                        e.getValue()
+                ))
+                .toList();
+    }
+
+
+
+
+
+
 
     /**
      * Get KPI data for current day only
