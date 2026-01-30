@@ -26,7 +26,7 @@ public class DeviceDataController {
     private final DeviceService deviceService;
     private final RestTemplate restTemplate;
 
-    @Value("${mqtt.api.base-url:http://localhost:8090}")
+    @Value("${mqtt.api.base-url}")
     private String mqttApiBaseUrl;
 
     /**

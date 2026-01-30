@@ -3,7 +3,7 @@ spring:
     name: device-manager
 
   datasource:
-    url: jdbc:postgresql://45.79.122.134:5432:5432/device_hub
+    url: jdbc:postgresql://45.79.122.134:5432/device_hub
     username: jack2872
     password: Tester@4723$
     driver-class-name: org.postgresql.Driver
@@ -61,6 +61,6 @@ logging:
 
 mqtt:
   api:
-    base-url: https://edge.iotiq.co.in  # Change to your MQTT service URL
+    base-url: http://45.79.121.181:8090  # Change to your MQTT service URL
   polling:
     enabled: true

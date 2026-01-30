@@ -34,6 +34,16 @@ spring:
     time-zone: UTC
     default-property-inclusion: non_null
 
+eureka:
+  client:
+    service-url:
+      defaultZone: http://eureka-server:8761/eureka/
+    register-with-eureka: true
+    fetch-registry: true
+  instance:
+    prefer-ip-address: true
+    instance-id: ${spring.application.name}:${random.value}
+
 server:
   port: 8091
   servlet:
