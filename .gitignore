@@ -8,3 +8,7 @@ target/
 .idea/
 .vscode/
 *.iml
+
+# OS
+.DS_Store
+
