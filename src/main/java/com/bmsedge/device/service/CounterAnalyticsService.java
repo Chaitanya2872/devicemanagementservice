@@ -1836,7 +1836,6 @@ public class CounterAnalyticsService {
             List<Map<String, Object>> mqttData,
             int totalDeviceCount) {
 
-        // Group data by hour
         Map<Integer, List<Map<String, Object>>> hourlyData = new TreeMap<>();
 
         for (Map<String, Object> data : mqttData) {
@@ -1845,74 +1844,70 @@ public class CounterAnalyticsService {
                     LocalDateTime timestamp = LocalDateTime.parse(
                             data.get("timestamp").toString(),
                             DateTimeFormatter.ISO_DATE_TIME);
-                    int hour = timestamp.getHour();
-
-                    hourlyData.computeIfAbsent(hour, k -> new ArrayList<>()).add(data);
-                } catch (Exception e) {
-                    log.debug("Error parsing timestamp: {}", e.getMessage());
-                }
+                    hourlyData
+                            .computeIfAbsent(timestamp.getHour(), k -> new ArrayList<>())
+                            .add(data);
+                } catch (Exception ignored) {}
             }
         }
 
-        // Calculate metrics for each hour
         List<Map<String, Object>> hourlyBreakdown = new ArrayList<>();
 
         for (Map.Entry<Integer, List<Map<String, Object>>> entry : hourlyData.entrySet()) {
             int hour = entry.getKey();
             List<Map<String, Object>> hourData = entry.getValue();
 
-            // Extract inCount values (footfall)
             List<Double> footfallValues = hourData.stream()
                     .map(this::extractInCount)
                     .filter(Objects::nonNull)
                     .collect(Collectors.toList());
 
-            // Extract wait time values
             List<Double> waitTimeValues = hourData.stream()
                     .map(this::extractWaitTime)
                     .filter(Objects::nonNull)
                     .collect(Collectors.toList());
 
-            if (!footfallValues.isEmpty() || !waitTimeValues.isEmpty()) {
-                DoubleSummaryStatistics footfallStats = footfallValues.stream()
-                        .mapToDouble(Double::doubleValue)
-                        .summaryStatistics();
-
-                DoubleSummaryStatistics waitTimeStats = waitTimeValues.stream()
-                        .mapToDouble(Double::doubleValue)
-                        .summaryStatistics();
-
-                Map<String, Object> hourMetrics = new HashMap<>();
-                hourMetrics.put("hour", hour);
-                hourMetrics.put("hourLabel", String.format("%02d:00 - %02d:00", hour, hour + 1));
-
-                // Footfall metrics
-                hourMetrics.put("totalFootfall", roundToOneDecimal(footfallStats.getSum()));
-                hourMetrics.put("averageFootfall", roundToOneDecimal(footfallStats.getAverage()));
-                hourMetrics.put("peakFootfall", roundToOneDecimal(footfallStats.getMax()));
-                hourMetrics.put("minFootfall", roundToOneDecimal(footfallStats.getMin()));
-
-                // Wait time metrics
-                hourMetrics.put("averageWaitTime", roundToOneDecimal(waitTimeStats.getAverage()));
-                hourMetrics.put("maxWaitTime", roundToOneDecimal(waitTimeStats.getMax()));
-                hourMetrics.put("minWaitTime", roundToOneDecimal(waitTimeStats.getMin()));
-
-                // Correlation metrics
-                double footfallWaitRatio = footfallStats.getAverage() > 0
-                        ? waitTimeStats.getAverage() / footfallStats.getAverage()
-                        : 0.0;
-                hourMetrics.put("footfallWaitRatio", roundToOneDecimal(footfallWaitRatio));
-
-                // Activity level
-                hourMetrics.put("dataPointCount", hourData.size());
-                hourMetrics.put("activeDevices", calculateActiveDevices(hourData));
-
-                hourlyBreakdown.add(hourMetrics);
+            if (footfallValues.isEmpty() && waitTimeValues.isEmpty()) {
+                continue;
             }
+
+            DoubleSummaryStatistics footfallStats = footfallValues.stream()
+                    .mapToDouble(Double::doubleValue)
+                    .summaryStatistics();
+
+            DoubleSummaryStatistics waitTimeStats = waitTimeValues.stream()
+                    .mapToDouble(Double::doubleValue)
+                    .summaryStatistics();
+
+            Map<String, Object> hourMetrics = new HashMap<>();
+            hourMetrics.put("hour", hour);
+            hourMetrics.put("hourLabel",
+                    String.format("%02d:00 - %02d:00", hour, hour + 1));
+
+            // ✅ FOOTFALL — USE MAX, NOT SUM
+            hourMetrics.put("totalFootfall", roundToOneDecimal(footfallStats.getMax()));
+            hourMetrics.put("averageFootfall", roundToOneDecimal(footfallStats.getAverage()));
+            hourMetrics.put("minFootfall", roundToOneDecimal(footfallStats.getMin()));
+
+            // Wait time metrics
+            hourMetrics.put("averageWaitTime", roundToOneDecimal(waitTimeStats.getAverage()));
+            hourMetrics.put("maxWaitTime", roundToOneDecimal(waitTimeStats.getMax()));
+            hourMetrics.put("minWaitTime", roundToOneDecimal(waitTimeStats.getMin()));
+
+            double ratio = footfallStats.getAverage() > 0
+                    ? waitTimeStats.getAverage() / footfallStats.getAverage()
+                    : 0.0;
+
+            hourMetrics.put("footfallWaitRatio", roundToOneDecimal(ratio));
+            hourMetrics.put("dataPointCount", hourData.size());
+            hourMetrics.put("activeDevices", calculateActiveDevices(hourData));
+
+            hourlyBreakdown.add(hourMetrics);
         }
 
         return hourlyBreakdown;
     }
+
 
     /**
      * Calculate daily summary statistics
@@ -1940,7 +1935,7 @@ public class CounterAnalyticsService {
                     .mapToDouble(Double::doubleValue)
                     .summaryStatistics();
 
-            summary.put("totalFootfall", roundToOneDecimal(footfallStats.getSum()));
+            summary.put("totalFootfall", roundToOneDecimal(footfallStats.getMax()));
             summary.put("averageFootfall", roundToOneDecimal(footfallStats.getAverage()));
             summary.put("peakFootfall", roundToOneDecimal(footfallStats.getMax()));
             summary.put("footfallReadings", footfallStats.getCount());
