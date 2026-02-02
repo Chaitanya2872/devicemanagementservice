@@ -39,7 +39,7 @@ public class CounterAnalyticsService {
     private final CounterSessionAnalyticsRepository repository;
     private final MqttAggregationClient mqttAggregationClient;
 
-    @Value("${mqtt.api.base-url:http://localhost:8090}")
+    @Value("${mqtt.api.base-url}")
     private String mqttApiBaseUrl;
 
     /**
