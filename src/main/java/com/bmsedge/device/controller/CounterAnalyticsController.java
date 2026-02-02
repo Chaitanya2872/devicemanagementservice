@@ -96,15 +96,15 @@ public class CounterAnalyticsController {
             log.info("Successfully fetched counter queue trends for: {}", counterCode);
             return ResponseEntity.ok(response);
 
-        } catch (IllegalArgumentException e) {
-            log.error("Validation error: {}", e.getMessage());
-            return ResponseEntity.badRequest()
-                    .body(createErrorResponse(e.getMessage()));
         } catch (Exception e) {
-            log.error("Error fetching counter queue trends: {}", e.getMessage(), e);
+            e.printStackTrace(); // 🔥 DO NOT REMOVE YET
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(createErrorResponse("Error fetching counter queue trends: " + e.getMessage()));
+                    .body(Map.of(
+                            "error", e.getClass().getName(),
+                            "message", e.getMessage()
+                    ));
         }
+
     }
 
     /**
@@ -122,10 +122,6 @@ public class CounterAnalyticsController {
     @GetMapping("/compare")
     public ResponseEntity<?> compareCounterPerformance(
             @RequestParam("counterCodes") String counterCodes,
-            @RequestParam(value = "startTime", required = false)
-            @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime startTime,
-            @RequestParam(value = "endTime", required = false)
-            @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime endTime,
             @RequestParam(value = "filterType", defaultValue = "avg") String filterType) {
 
         try {
@@ -146,36 +142,33 @@ public class CounterAnalyticsController {
                         .body(createErrorResponse("Maximum 10 counters can be compared at once"));
             }
 
-            // Validate filter type
             if (!Arrays.asList("avg", "max", "min").contains(filterType.toLowerCase())) {
                 return ResponseEntity.badRequest()
                         .body(createErrorResponse("Invalid filter type. Use: avg, max, min"));
             }
 
-            // Set default time range
-            if (endTime == null) {
+            // ✅ ENFORCED BUSINESS WINDOW (TODAY 7AM–7PM)
+            LocalDateTime startTime = LocalDate.now().atTime(7, 0);
+            LocalDateTime endTime = LocalDate.now().atTime(19, 0);
+
+            // If API is called before 7 PM, cap endTime to now
+            if (LocalDateTime.now().isBefore(endTime)) {
                 endTime = LocalDateTime.now();
             }
-            if (startTime == null) {
-                startTime = endTime.minusHours(24);
-            }
 
-            Map<String, Object> response = counterAnalyticsService.compareCounterPerformance(
-                    counterCodeArray, startTime, endTime, filterType);
+            Map<String, Object> response =
+                    counterAnalyticsService.compareCounterPerformance(
+                            counterCodeArray, startTime, endTime, filterType);
 
-            log.info("Successfully compared {} counters", counterCodeArray.length);
             return ResponseEntity.ok(response);
 
-        } catch (IllegalArgumentException e) {
-            log.error("Validation error: {}", e.getMessage());
-            return ResponseEntity.badRequest()
-                    .body(createErrorResponse(e.getMessage()));
         } catch (Exception e) {
-            log.error("Error comparing counter performance: {}", e.getMessage(), e);
+            log.error("Error comparing counter performance", e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(createErrorResponse("Error comparing counter performance: " + e.getMessage()));
+                    .body(createErrorResponse("Error comparing counter performance"));
         }
     }
+
 
     /**
      * Get counter performance analysis
@@ -189,11 +182,7 @@ public class CounterAnalyticsController {
      */
     @GetMapping("/counter/{counterCode}/performance")
     public ResponseEntity<?> getCounterPerformanceAnalysis(
-            @PathVariable("counterCode") String counterCode,
-            @RequestParam(value = "startTime", required = false)
-            @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime startTime,
-            @RequestParam(value = "endTime", required = false)
-            @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime endTime) {
+            @PathVariable("counterCode") String counterCode) {
 
         try {
             log.info("Analyzing counter performance: {}", counterCode);
@@ -203,30 +192,28 @@ public class CounterAnalyticsController {
                         .body(createErrorResponse("Counter code cannot be null or empty"));
             }
 
-            // Set default time range
-            if (endTime == null) {
+            // ✅ ENFORCED BUSINESS WINDOW (TODAY 7AM–7PM)
+            LocalDateTime startTime = LocalDate.now().atTime(7, 0);
+            LocalDateTime endTime = LocalDate.now().atTime(19, 0);
+
+            // Cap end time if before 7 PM
+            if (LocalDateTime.now().isBefore(endTime)) {
                 endTime = LocalDateTime.now();
             }
-            if (startTime == null) {
-                startTime = endTime.minusDays(7);
-            }
 
-            Map<String, Object> response = counterAnalyticsService.getCounterPerformanceAnalysis(
-                    counterCode, startTime, endTime);
+            Map<String, Object> response =
+                    counterAnalyticsService.getCounterPerformanceAnalysis(
+                            counterCode, startTime, endTime);
 
-            log.info("Successfully analyzed performance for counter: {}", counterCode);
             return ResponseEntity.ok(response);
 
-        } catch (IllegalArgumentException e) {
-            log.error("Validation error: {}", e.getMessage());
-            return ResponseEntity.badRequest()
-                    .body(createErrorResponse(e.getMessage()));
         } catch (Exception e) {
-            log.error("Error analyzing counter performance: {}", e.getMessage(), e);
+            log.error("Error analyzing counter performance", e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(createErrorResponse("Error analyzing counter performance: " + e.getMessage()));
+                    .body(createErrorResponse("Error analyzing counter performance"));
         }
     }
+
 
     /**
      * Get LIVE real-time status for counters
@@ -501,6 +488,280 @@ public class CounterAnalyticsController {
                         endDate.atTime(23, 59, 59)
                 )
         );
+    }
+
+    /**
+     * ADD THIS METHOD TO CounterAnalyticsController.java
+     * Insert this method in the controller class alongside other GET endpoints
+     */
+
+    /**
+     * Get Daily Footfall vs Wait Time Analysis
+     * GET /api/counter-analytics/{counterCode}/footfall-vs-waittime
+     *
+     * Analyzes the relationship between footfall (inCount) and wait times throughout the day
+     * Provides hourly breakdown, daily summary, and peak period identification
+     *
+     * Query params:
+     * - date: Target date (format: yyyy-MM-dd) (optional, defaults to today)
+     *
+     * Response structure:
+     * {
+     *   "counterCode": "CNT001",
+     *   "counterName": "Main Counter",
+     *   "date": "2024-02-01",
+     *   "hourlyBreakdown": [
+     *     {
+     *       "hour": 9,
+     *       "hourLabel": "09:00 - 10:00",
+     *       "totalFootfall": 145.5,
+     *       "averageFootfall": 12.1,
+     *       "averageWaitTime": 4.2,
+     *       "maxWaitTime": 8.5,
+     *       "footfallWaitRatio": 0.35
+     *     }
+     *   ],
+     *   "dailySummary": {
+     *     "totalFootfall": 2345.6,
+     *     "averageWaitTime": 3.7,
+     *     "serviceLevel": 85.5
+     *   },
+     *   "peakAnalysis": {
+     *     "peakFootfallHour": {...},
+     *     "peakWaitTimeHour": {...},
+     *     "bestPerformingHour": {...},
+     *     "worstPerformingHour": {...}
+     *   }
+     * }
+     *
+     * Example usage:
+     * - GET /api/counter-analytics/CNT001/footfall-vs-waittime
+     * - GET /api/counter-analytics/CNT001/footfall-vs-waittime?date=2024-02-01
+     */
+    @GetMapping("/{counterCode}/footfall-vs-waittime")
+    public ResponseEntity<?> getDailyFootfallVsWaitTime(
+            @PathVariable("counterCode") String counterCode,
+            @RequestParam(value = "date", required = false)
+            @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date) {
+
+        try {
+            log.info("GET /api/counter-analytics/{}/footfall-vs-waittime?date={}",
+                    counterCode, date);
+
+            // Trim and validate counter code
+            counterCode = counterCode.trim();
+
+            if (counterCode.isEmpty()) {
+                return ResponseEntity.badRequest()
+                        .body(createErrorResponse("Counter code cannot be empty"));
+            }
+
+            // Default to today if date not provided
+            LocalDate targetDate = date != null ? date : LocalDate.now();
+
+            // Validate date is not in the future
+            if (targetDate.isAfter(LocalDate.now())) {
+                return ResponseEntity.badRequest()
+                        .body(createErrorResponse("Date cannot be in the future"));
+            }
+
+            // Call service method
+            Map<String, Object> response = counterAnalyticsService
+                    .getDailyFootfallVsWaitTime(counterCode, targetDate);
+
+            log.info("Successfully fetched footfall vs wait time analysis for counter: {} on {}",
+                    counterCode, targetDate);
+
+            return ResponseEntity.ok(response);
+
+        } catch (IllegalArgumentException e) {
+            log.error("Validation error for counter {}: {}", counterCode, e.getMessage());
+            return ResponseEntity.badRequest()
+                    .body(createErrorResponse(e.getMessage()));
+
+        } catch (Exception e) {
+            log.error("Error fetching footfall vs wait time for counter {}: {}",
+                    counterCode, e.getMessage(), e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(createErrorResponse(
+                            "Error fetching footfall vs wait time analysis: " + e.getMessage()));
+        }
+    }
+
+    /**
+     * OPTIONAL: Get Footfall vs Wait Time for Multiple Days (Date Range)
+     * GET /api/counter-analytics/{counterCode}/footfall-vs-waittime/range
+     *
+     * Provides aggregated footfall vs wait time analysis across multiple days
+     * Useful for weekly/monthly reports and trend analysis
+     *
+     * Query params:
+     * - startDate: Start date (format: yyyy-MM-dd) (required)
+     * - endDate: End date (format: yyyy-MM-dd) (required)
+     *
+     * Response includes daily breakdown and aggregated summary
+     *
+     * Example usage:
+     * - GET /api/counter-analytics/CNT001/footfall-vs-waittime/range?startDate=2024-02-01&endDate=2024-02-07
+     */
+    @GetMapping("/{counterCode}/footfall-vs-waittime/range")
+    public ResponseEntity<?> getFootfallVsWaitTimeRange(
+            @PathVariable("counterCode") String counterCode,
+            @RequestParam(value = "startDate", required = true)
+            @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate startDate,
+            @RequestParam(value = "endDate", required = true)
+            @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate endDate) {
+
+        try {
+            log.info("GET /api/counter-analytics/{}/footfall-vs-waittime/range?startDate={}&endDate={}",
+                    counterCode, startDate, endDate);
+
+            // Trim and validate counter code
+            counterCode = counterCode.trim();
+
+            if (counterCode.isEmpty()) {
+                return ResponseEntity.badRequest()
+                        .body(createErrorResponse("Counter code cannot be empty"));
+            }
+
+            // Validate date range
+            if (startDate.isAfter(endDate)) {
+                return ResponseEntity.badRequest()
+                        .body(createErrorResponse("Start date must be before or equal to end date"));
+            }
+
+            if (endDate.isAfter(LocalDate.now())) {
+                return ResponseEntity.badRequest()
+                        .body(createErrorResponse("End date cannot be in the future"));
+            }
+
+            // Limit to maximum 31 days
+            long daysBetween = ChronoUnit.DAYS.between(startDate, endDate) + 1;
+            if (daysBetween > 31) {
+                return ResponseEntity.badRequest()
+                        .body(createErrorResponse(
+                                "Date range too large. Maximum 31 days allowed (requested: " + daysBetween + " days)"));
+            }
+
+            // Collect data for each day in the range
+            List<Map<String, Object>> dailyData = new ArrayList<>();
+            LocalDate currentDate = startDate;
+
+            while (!currentDate.isAfter(endDate)) {
+                try {
+                    Map<String, Object> dayResult = counterAnalyticsService
+                            .getDailyFootfallVsWaitTime(counterCode, currentDate);
+                    dailyData.add(dayResult);
+                } catch (Exception e) {
+                    log.warn("Error fetching data for date {}: {}", currentDate, e.getMessage());
+                    // Continue to next date instead of failing entire request
+                }
+                currentDate = currentDate.plusDays(1);
+            }
+
+            // Calculate aggregated summary across all days
+            Map<String, Object> aggregatedSummary = calculateAggregatedFootfallWaitTimeSummary(dailyData);
+
+            // Build response
+            Map<String, Object> response = new HashMap<>();
+            response.put("counterCode", counterCode);
+            response.put("startDate", startDate);
+            response.put("endDate", endDate);
+            response.put("totalDays", dailyData.size());
+            response.put("dailyBreakdown", dailyData);
+            response.put("aggregatedSummary", aggregatedSummary);
+
+            log.info("Successfully fetched footfall vs wait time for {} days", dailyData.size());
+
+            return ResponseEntity.ok(response);
+
+        } catch (IllegalArgumentException e) {
+            log.error("Validation error: {}", e.getMessage());
+            return ResponseEntity.badRequest()
+                    .body(createErrorResponse(e.getMessage()));
+
+        } catch (Exception e) {
+            log.error("Error fetching footfall vs wait time range: {}", e.getMessage(), e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(createErrorResponse(
+                            "Error fetching footfall vs wait time range: " + e.getMessage()));
+        }
+    }
+
+    /**
+     * Helper method: Calculate aggregated summary across multiple days
+     * This summarizes the date range data into overall metrics
+     */
+    private Map<String, Object> calculateAggregatedFootfallWaitTimeSummary(
+            List<Map<String, Object>> dailyData) {
+
+        Map<String, Object> summary = new HashMap<>();
+
+        if (dailyData.isEmpty()) {
+            return summary;
+        }
+
+        // Extract all daily summaries
+        List<Double> totalFootfalls = new ArrayList<>();
+        List<Double> avgWaitTimes = new ArrayList<>();
+        List<Double> serviceLevels = new ArrayList<>();
+        List<Double> peakFootfalls = new ArrayList<>();
+        List<Double> maxWaitTimes = new ArrayList<>();
+
+        for (Map<String, Object> dayData : dailyData) {
+            if (dayData.containsKey("dailySummary")) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> daySummary = (Map<String, Object>) dayData.get("dailySummary");
+
+                if (daySummary.containsKey("totalFootfall")) {
+                    totalFootfalls.add(((Number) daySummary.get("totalFootfall")).doubleValue());
+                }
+                if (daySummary.containsKey("averageWaitTime")) {
+                    avgWaitTimes.add(((Number) daySummary.get("averageWaitTime")).doubleValue());
+                }
+                if (daySummary.containsKey("serviceLevel")) {
+                    serviceLevels.add(((Number) daySummary.get("serviceLevel")).doubleValue());
+                }
+                if (daySummary.containsKey("peakFootfall")) {
+                    peakFootfalls.add(((Number) daySummary.get("peakFootfall")).doubleValue());
+                }
+                if (daySummary.containsKey("maxWaitTime")) {
+                    maxWaitTimes.add(((Number) daySummary.get("maxWaitTime")).doubleValue());
+                }
+            }
+        }
+
+        // Calculate aggregates
+        if (!totalFootfalls.isEmpty()) {
+            summary.put("totalFootfallAllDays",
+                    Math.round(totalFootfalls.stream().mapToDouble(Double::doubleValue).sum() * 10.0) / 10.0);
+            summary.put("averageDailyFootfall",
+                    Math.round(totalFootfalls.stream().mapToDouble(Double::doubleValue).average().orElse(0.0) * 10.0) / 10.0);
+        }
+
+        if (!avgWaitTimes.isEmpty()) {
+            summary.put("averageWaitTimeAllDays",
+                    Math.round(avgWaitTimes.stream().mapToDouble(Double::doubleValue).average().orElse(0.0) * 10.0) / 10.0);
+        }
+
+        if (!serviceLevels.isEmpty()) {
+            summary.put("averageServiceLevel",
+                    Math.round(serviceLevels.stream().mapToDouble(Double::doubleValue).average().orElse(0.0) * 10.0) / 10.0);
+        }
+
+        if (!peakFootfalls.isEmpty()) {
+            summary.put("overallPeakFootfall",
+                    Math.round(peakFootfalls.stream().mapToDouble(Double::doubleValue).max().orElse(0.0) * 10.0) / 10.0);
+        }
+
+        if (!maxWaitTimes.isEmpty()) {
+            summary.put("overallMaxWaitTime",
+                    Math.round(maxWaitTimes.stream().mapToDouble(Double::doubleValue).max().orElse(0.0) * 10.0) / 10.0);
+        }
+
+        summary.put("daysAnalyzed", dailyData.size());
+
+        return summary;
     }
 
 

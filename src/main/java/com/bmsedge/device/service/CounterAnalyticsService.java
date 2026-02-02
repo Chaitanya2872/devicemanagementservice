@@ -15,10 +15,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
-import java.time.DayOfWeek;
-import java.time.LocalDate;
-import java.time.LocalDateTime;
-import java.time.YearMonth;
+import java.time.*;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
@@ -212,93 +209,86 @@ public class CounterAnalyticsService {
                     continue;
                 }
 
-                // Collect MQTT data for all devices
+                // ---------- Collect MQTT data ----------
                 List<Map<String, Object>> allData = new ArrayList<>();
+
                 for (Device device : devices) {
                     try {
-                        String url = String.format("%s/api/mqtt-data/device/%s",
-                                mqttApiBaseUrl, device.getDeviceId());
+                        String url = String.format(
+                                "%s/api/mqtt-data/device/%s",
+                                mqttApiBaseUrl,
+                                device.getDeviceId()
+                        );
 
                         Map<String, Object> response = restTemplate.getForObject(url, Map.class);
 
-                        if (response != null && "success".equals(response.get("status")) && response.containsKey("data")) {
-                            Object dataObj = response.get("data");
+                        if (response != null
+                                && "success".equals(response.get("status"))
+                                && response.containsKey("data")) {
 
-                            if (dataObj instanceof List) {
-                                @SuppressWarnings("unchecked")
-                                List<Map<String, Object>> deviceData = (List<Map<String, Object>>) dataObj;
+                            @SuppressWarnings("unchecked")
+                            List<Map<String, Object>> deviceData =
+                                    (List<Map<String, Object>>) response.get("data");
 
-                                // Filter by time range
-                                List<Map<String, Object>> filteredData = deviceData.stream()
-                                        .filter(data -> {
-                                            if (data.containsKey("timestamp")) {
-                                                try {
-                                                    LocalDateTime dataTime = LocalDateTime.parse(
-                                                            data.get("timestamp").toString(),
-                                                            DateTimeFormatter.ISO_DATE_TIME);
-                                                    return !dataTime.isBefore(startTime) && !dataTime.isAfter(endTime);
-                                                } catch (Exception e) {
-                                                    return false;
-                                                }
-                                            }
+                            List<Map<String, Object>> filtered = deviceData.stream()
+                                    .filter(d -> {
+                                        try {
+                                            if (!d.containsKey("timestamp")) return false;
+                                            LocalDateTime ts = LocalDateTime.parse(
+                                                    d.get("timestamp").toString(),
+                                                    DateTimeFormatter.ISO_DATE_TIME
+                                            );
+                                            return !ts.isBefore(startTime) && !ts.isAfter(endTime);
+                                        } catch (Exception e) {
                                             return false;
-                                        })
-                                        .collect(Collectors.toList());
+                                        }
+                                    })
+                                    .toList();
 
-                                filteredData.forEach(d -> d.put("deviceId", device.getDeviceId()));
-                                allData.addAll(filteredData);
-                            }
+                            filtered.forEach(d -> d.put("deviceId", device.getDeviceId()));
+                            allData.addAll(filtered);
                         }
                     } catch (Exception e) {
                         log.error("Error fetching data for device {}: {}", device.getDeviceId(), e.getMessage());
                     }
                 }
 
-                if (!allData.isEmpty()) {
-                    // Calculate cumulative stats
-                    Map<String, Object> stats = calculateAggregatedStats(allData, devices.size());
+                if (allData.isEmpty()) continue;
 
-                    // ========== NEW: Calculate Congestion Rate ==========
-                    double averageTotalQueue = ((Number) stats.get("averageTotalQueue")).doubleValue();
-                    double maxTotalQueue = ((Number) stats.get("maxTotalQueue")).doubleValue();
-                    double congestionRate = calculateCongestionRate(averageTotalQueue, maxTotalQueue);
-                    // ====================================================
+                // ---------- Aggregated stats (single source of truth) ----------
+                Map<String, Object> stats = calculateAggregatedStats(allData, devices.size());
 
-                    double filterValue = switch (filterType.toLowerCase()) {
-                        case "max" -> ((Number) stats.get("maxTotalQueue")).doubleValue();
-                        case "min" -> ((Number) stats.get("minTotalQueue")).doubleValue();
-                        default -> ((Number) stats.get("averageTotalQueue")).doubleValue();
-                    };
+                double filterValue = switch (filterType.toLowerCase()) {
+                    case "max" -> ((Number) stats.get("maxTotalQueue")).doubleValue();
+                    case "min" -> ((Number) stats.get("minTotalQueue")).doubleValue();
+                    default -> ((Number) stats.get("averageTotalQueue")).doubleValue();
+                };
 
-                    Map<String, Object> comparison = new HashMap<>();
-                    comparison.put("counterCode", counterCode);
-                    comparison.put("counterName", counter.getCounterName());
-                    comparison.put("counterType", counter.getCounterType());
-                    comparison.put("deviceCount", devices.size());
-                    comparison.put("averageTotalQueue", stats.get("averageTotalQueue"));
-                    comparison.put("averageQueuePerDevice", stats.get("averageQueuePerDevice"));
-                    comparison.put("maxTotalQueue", stats.get("maxTotalQueue"));
-                    comparison.put("minTotalQueue", stats.get("minTotalQueue"));
-                    comparison.put("filterValue", filterValue);
-                    comparison.put("totalReadings", stats.get("totalReadings"));
-                    comparison.put("efficiency", stats.get("efficiency"));
+                Map<String, Object> comparison = new HashMap<>();
+                comparison.put("counterCode", counterCode);
+                comparison.put("counterName", counter.getCounterName());
+                comparison.put("counterType", counter.getCounterType());
+                comparison.put("deviceCount", devices.size());
 
-                    // ========== NEW: Add Congestion Rate to response ==========
-                    comparison.put("congestionRate", congestionRate);
-                    // ==========================================================
+                comparison.put("averageTotalQueue", stats.get("averageTotalQueue"));
+                comparison.put("averageQueuePerDevice", stats.get("averageQueuePerDevice"));
+                comparison.put("maxTotalQueue", stats.get("maxTotalQueue"));
+                comparison.put("minTotalQueue", stats.get("minTotalQueue"));
+                comparison.put("totalReadings", stats.get("totalReadings"));
+                comparison.put("congestionRate", stats.get("congestionRate"));
 
-                    comparisons.add(comparison);
-                }
+                comparison.put("filterValue", filterValue);
+
+                comparisons.add(comparison);
 
             } catch (Exception e) {
-                log.error("Error processing counter {}: {}", counterCode, e.getMessage());
+                log.error("Error processing counter {}: {}", counterCode, e.getMessage(), e);
             }
         }
 
-        // Sort by filter value
-        comparisons.sort((a, b) -> Double.compare(
-                ((Number) a.get("filterValue")).doubleValue(),
-                ((Number) b.get("filterValue")).doubleValue()
+        // ---------- Sort ----------
+        comparisons.sort(Comparator.comparingDouble(
+                c -> ((Number) c.get("filterValue")).doubleValue()
         ));
 
         Map<String, Object> response = new HashMap<>();
@@ -309,32 +299,30 @@ public class CounterAnalyticsService {
         response.put("endTime", endTime);
         response.put("comparisons", comparisons);
 
-        // Add insights
+        // ---------- Insights ----------
         if (!comparisons.isEmpty()) {
             Map<String, Object> best = comparisons.get(0);
             Map<String, Object> worst = comparisons.get(comparisons.size() - 1);
 
-            Map<String, Object> insights = new HashMap<>();
-            insights.put("bestPerforming", Map.of(
-                    "counterCode", best.get("counterCode"),
-                    "counterName", best.get("counterName"),
-                    "averageQueue", best.get("averageTotalQueue"),
-                    "efficiency", best.get("efficiency"),
-                    "congestionRate", best.get("congestionRate")  // NEW
+            response.put("insights", Map.of(
+                    "bestPerforming", Map.of(
+                            "counterCode", best.get("counterCode"),
+                            "counterName", best.get("counterName"),
+                            "averageQueue", best.get("averageTotalQueue"),
+                            "congestionRate", best.get("congestionRate")
+                    ),
+                    "worstPerforming", Map.of(
+                            "counterCode", worst.get("counterCode"),
+                            "counterName", worst.get("counterName"),
+                            "averageQueue", worst.get("averageTotalQueue"),
+                            "congestionRate", worst.get("congestionRate")
+                    )
             ));
-            insights.put("worstPerforming", Map.of(
-                    "counterCode", worst.get("counterCode"),
-                    "counterName", worst.get("counterName"),
-                    "averageQueue", worst.get("averageTotalQueue"),
-                    "efficiency", worst.get("efficiency"),
-                    "congestionRate", worst.get("congestionRate")  // NEW
-            ));
-
-            response.put("insights", insights);
         }
 
         return response;
     }
+
 
     /**
      * Get counter performance analysis with hourly patterns
@@ -346,90 +334,109 @@ public class CounterAnalyticsService {
 
         log.info("Analyzing counter performance: {}", counterCode);
 
-        try {
-            Counter counter = counterRepository.findByCounterCode(counterCode)
-                    .orElseThrow(() -> new IllegalArgumentException("Counter not found: " + counterCode));
+        Counter counter = counterRepository.findByCounterCode(counterCode)
+                .orElseThrow(() -> new IllegalArgumentException("Counter not found: " + counterCode));
 
-            List<Device> devices = deviceRepository.findByCounterId(counter.getId());
-            if (devices.isEmpty()) {
-                return createEmptyResponse(counterCode, counter.getCounterName());
-            }
-
-            // Collect all MQTT data
-            List<Map<String, Object>> allData = new ArrayList<>();
-            for (Device device : devices) {
-                try {
-                    String url = String.format("%s/api/mqtt-data/device/%s",
-                            mqttApiBaseUrl, device.getDeviceId());
-
-                    Map<String, Object> response = restTemplate.getForObject(url, Map.class);
-
-                    if (response != null && "success".equals(response.get("status")) && response.containsKey("data")) {
-                        Object dataObj = response.get("data");
-
-                        if (dataObj instanceof List) {
-                            @SuppressWarnings("unchecked")
-                            List<Map<String, Object>> deviceData = (List<Map<String, Object>>) dataObj;
-
-                            // Filter by time range
-                            List<Map<String, Object>> filteredData = deviceData.stream()
-                                    .filter(data -> {
-                                        if (data.containsKey("timestamp")) {
-                                            try {
-                                                LocalDateTime dataTime = LocalDateTime.parse(
-                                                        data.get("timestamp").toString(),
-                                                        DateTimeFormatter.ISO_DATE_TIME);
-                                                return !dataTime.isBefore(startTime) && !dataTime.isAfter(endTime);
-                                            } catch (Exception e) {
-                                                return false;
-                                            }
-                                        }
-                                        return false;
-                                    })
-                                    .collect(Collectors.toList());
-
-                            filteredData.forEach(d -> d.put("deviceId", device.getDeviceId()));
-                            allData.addAll(filteredData);
-                        }
-                    }
-                } catch (Exception e) {
-                    log.error("Error fetching data for device {}: {}", device.getDeviceId(), e.getMessage());
-                }
-            }
-
-            if (allData.isEmpty()) {
-                return createEmptyResponse(counterCode, counter.getCounterName());
-            }
-
-            // Calculate hourly pattern with cumulative data
-            List<Map<String, Object>> hourlyPattern = calculateHourlyPattern(allData, devices.size());
-
-            // Overall statistics
-            Map<String, Object> statistics = calculateAggregatedStats(allData, devices.size());
-
-            // Peak and low hours
-            List<Integer> peakHours = findPeakHours(hourlyPattern);
-            List<Integer> lowHours = findLowHours(hourlyPattern);
-
-            Map<String, Object> response = new HashMap<>();
-            response.put("counterCode", counterCode);
-            response.put("counterName", counter.getCounterName());
-            response.put("counterType", counter.getCounterType());
-            response.put("deviceCount", devices.size());
-            response.put("startTime", startTime);
-            response.put("endTime", endTime);
-            response.put("hourlyPattern", hourlyPattern);
-            response.put("statistics", statistics);
-            response.put("peakHours", peakHours);
-            response.put("lowHours", lowHours);
-
-            return response;
-
-        } catch (Exception e) {
-            log.error("Error analyzing counter performance: {}", e.getMessage(), e);
-            throw new RuntimeException("Error analyzing counter performance", e);
+        List<Device> devices = deviceRepository.findByCounterId(counter.getId());
+        if (devices.isEmpty()) {
+            return createEmptyResponse(counterCode, counter.getCounterName());
         }
+
+        // ---------- Collect MQTT data ----------
+        List<Map<String, Object>> allData = new ArrayList<>();
+
+        for (Device device : devices) {
+            try {
+                String url = String.format(
+                        "%s/api/mqtt-data/device/%s",
+                        mqttApiBaseUrl,
+                        device.getDeviceId()
+                );
+
+                Map<String, Object> response = restTemplate.getForObject(url, Map.class);
+
+                if (response != null
+                        && "success".equals(response.get("status"))
+                        && response.containsKey("data")) {
+
+                    @SuppressWarnings("unchecked")
+                    List<Map<String, Object>> deviceData =
+                            (List<Map<String, Object>>) response.get("data");
+
+                    List<Map<String, Object>> filtered = deviceData.stream()
+                            .filter(d -> {
+                                try {
+                                    if (!d.containsKey("timestamp")) return false;
+                                    LocalDateTime ts = LocalDateTime.parse(
+                                            d.get("timestamp").toString(),
+                                            DateTimeFormatter.ISO_DATE_TIME
+                                    );
+                                    return !ts.isBefore(startTime) && !ts.isAfter(endTime);
+                                } catch (Exception e) {
+                                    return false;
+                                }
+                            })
+                            .toList();
+
+                    filtered.forEach(d -> d.put("deviceId", device.getDeviceId()));
+                    allData.addAll(filtered);
+                }
+            } catch (Exception e) {
+                log.error("Error fetching data for device {}: {}", device.getDeviceId(), e.getMessage());
+            }
+        }
+
+        if (allData.isEmpty()) {
+            return createEmptyResponse(counterCode, counter.getCounterName());
+        }
+
+        // ======================================================
+        // 🔥 CURRENT DAY ONLY FILTER (CRITICAL FIX)
+        // ======================================================
+        LocalDate today = endTime.toLocalDate();
+
+        List<Map<String, Object>> todayData = allData.stream()
+                .filter(d -> {
+                    try {
+                        if (!d.containsKey("timestamp")) return false;
+                        LocalDateTime ts = LocalDateTime.parse(
+                                d.get("timestamp").toString(),
+                                DateTimeFormatter.ISO_DATE_TIME
+                        );
+                        return ts.toLocalDate().equals(today);
+                    } catch (Exception e) {
+                        return false;
+                    }
+                })
+                .toList();
+
+        // ---------- Hourly pattern (TODAY ONLY) ----------
+        List<Map<String, Object>> hourlyPattern =
+                calculateHourlyPattern(todayData, devices.size());
+
+        // ---------- Overall statistics (range based) ----------
+        Map<String, Object> statistics =
+                calculateAggregatedStats(allData, devices.size());
+
+        // ---------- Peak / Low hours (TODAY ONLY) ----------
+        List<Integer> peakHours = findPeakHours(hourlyPattern);
+        List<Integer> lowHours = findLowHours(hourlyPattern);
+
+        Map<String, Object> response = new HashMap<>();
+        response.put("counterCode", counterCode);
+        response.put("counterName", counter.getCounterName());
+        response.put("counterType", counter.getCounterType());
+        response.put("deviceCount", devices.size());
+        response.put("startTime", startTime);
+        response.put("endTime", endTime);
+        response.put("hourlyPattern", hourlyPattern);
+        response.put("statistics", statistics);
+        response.put("peakHours", peakHours);
+        response.put("lowHours", lowHours);
+
+        return response;
     }
+
 
     /**
      * Get all active counters summary
@@ -573,10 +580,12 @@ public class CounterAnalyticsService {
 
         for (Map<String, Object> data : mqttData) {
             if (data.containsKey("timestamp") && data.containsKey("deviceId")) {
-                Double queueLength = extractQueueValue(data);
 
-                if (queueLength == null) {
-                    continue; // Skip if no queue field exists
+                // 🔥 ONLY CHANGE: queueLength → occupancy
+                Double occupancy = extractOccupancyValue(data);
+
+                if (occupancy == null) {
+                    continue;
                 }
 
                 LocalDateTime timestamp = LocalDateTime.parse(
@@ -586,41 +595,64 @@ public class CounterAnalyticsService {
                 LocalDateTime bucket = roundToInterval(timestamp, minutes);
                 String deviceId = (String) data.get("deviceId");
 
+                // 🔥 SAME logic, just occupancy value
                 bucketDeviceMap.computeIfAbsent(bucket, k -> new HashMap<>())
-                        .put(deviceId, queueLength);
+                        .put(deviceId, occupancy);
             }
         }
 
-        // Calculate aggregates for each time bucket
+        // Calculate aggregates for each time bucket (UNCHANGED)
         return bucketDeviceMap.entrySet().stream()
                 .map(entry -> {
                     LocalDateTime timestamp = entry.getKey();
-                    Map<String, Double> deviceQueues = entry.getValue();
+                    Map<String, Double> deviceOccupancies = entry.getValue();
 
-                    // CUMULATIVE = Sum of all device queues at this timestamp
-                    double totalQueue = deviceQueues.values().stream()
+                    double totalOccupancy = deviceOccupancies.values().stream()
                             .mapToDouble(Double::doubleValue)
                             .sum();
 
-                    // Statistics across devices
-                    DoubleSummaryStatistics stats = deviceQueues.values().stream()
+                    DoubleSummaryStatistics stats = deviceOccupancies.values().stream()
                             .mapToDouble(Double::doubleValue)
                             .summaryStatistics();
 
                     Map<String, Object> trend = new HashMap<>();
                     trend.put("timestamp", timestamp);
-                    trend.put("totalQueueLength", totalQueue);        // SUM of all devices
-                    trend.put("averageQueueLength", stats.getAverage());  // Average per device
-                    trend.put("maxQueueLength", stats.getMax());
-                    trend.put("minQueueLength", stats.getMin());
-                    trend.put("activeDeviceCount", deviceQueues.size());
+
+                    // 🔥 Rename fields if you want
+                    trend.put("occupancy", totalOccupancy);          // instead of totalQueueLength
+                    trend.put("averageOccupancy", stats.getAverage());
+                    trend.put("maxOccupancy", stats.getMax());
+                    trend.put("minOccupancy", stats.getMin());
+
+                    trend.put("activeDeviceCount", deviceOccupancies.size());
                     trend.put("totalDeviceCount", totalDeviceCount);
-                    trend.put("dataPointCount", deviceQueues.size());
+                    trend.put("dataPointCount", deviceOccupancies.size());
 
                     return trend;
                 })
                 .collect(Collectors.toList());
     }
+
+    private Double extractOccupancyValue(Map<String, Object> data) {
+
+        Object value = data.get("occupancy"); // 🔥 THIS IS THE LOGIC
+
+        if (value == null) {
+            return null;
+        }
+
+        if (value instanceof Number) {
+            return ((Number) value).doubleValue();
+        }
+
+        try {
+            return Double.parseDouble(value.toString());
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+
 
     /**
      * Calculate aggregated statistics across all timestamps
@@ -632,45 +664,52 @@ public class CounterAnalyticsService {
         Map<String, Object> statistics = new HashMap<>();
 
         if (!trends.isEmpty()) {
-            // Statistics from cumulative trends
-            DoubleSummaryStatistics totalQueueStats = trends.stream()
-                    .mapToDouble(t -> ((Number) t.get("totalQueueLength")).doubleValue())
+
+            // ✅ OCCUPANCY statistics (NULL SAFE)
+            DoubleSummaryStatistics occupancyStats = trends.stream()
+                    .map(t -> t.get("occupancy"))
+                    .filter(Objects::nonNull)
+                    .mapToDouble(v -> ((Number) v).doubleValue())
                     .summaryStatistics();
 
-            statistics.put("averageTotalQueue", totalQueueStats.getAverage());
-            statistics.put("maxTotalQueue", totalQueueStats.getMax());
-            statistics.put("minTotalQueue", totalQueueStats.getMin());
+            statistics.put("averageOccupancy", occupancyStats.getAverage());
+            statistics.put("maxOccupancy", occupancyStats.getMax());
+            statistics.put("minOccupancy", occupancyStats.getMin());
 
-            // Per-device statistics
+            // ✅ Per-device occupancy stats
             long count = allMqttData.stream()
-                    .map(this::extractQueueValue)
+                    .map(this::extractOccupancyValue)   // ⬅️ make sure this exists
                     .filter(Objects::nonNull)
                     .count();
 
             double average = allMqttData.stream()
-                    .map(this::extractQueueValue)
+                    .map(this::extractOccupancyValue)
                     .filter(Objects::nonNull)
                     .mapToDouble(Double::doubleValue)
                     .average()
                     .orElse(0.0);
 
-            statistics.put("averageQueuePerDevice", average);
+            statistics.put("averageOccupancyPerDevice", average);
             statistics.put("totalReadings", count);
 
-            // Efficiency
-            double avg = totalQueueStats.getAverage();
-            double max = totalQueueStats.getMax();
+            // ✅ Efficiency based on occupancy
+            double avg = occupancyStats.getAverage();
+            double max = occupancyStats.getMax();
             statistics.put("efficiency", calculateEfficiency(avg, max));
 
-            // Trend
-            List<Double> totalQueues = trends.stream()
-                    .map(t -> ((Number) t.get("totalQueueLength")).doubleValue())
+            // ✅ Trend based on occupancy
+            List<Double> occupancies = trends.stream()
+                    .map(t -> t.get("occupancy"))
+                    .filter(Objects::nonNull)
+                    .map(v -> ((Number) v).doubleValue())
                     .collect(Collectors.toList());
-            statistics.put("trend", calculateTrend(totalQueues));
+
+            statistics.put("trend", calculateTrend(occupancies));
         }
 
         return statistics;
     }
+
 
     /**
      * Calculate aggregated stats from raw MQTT data
@@ -681,63 +720,82 @@ public class CounterAnalyticsService {
 
         Map<String, Object> stats = new HashMap<>();
 
-        // Group by timestamp to calculate cumulative queues
-        Map<LocalDateTime, List<Double>> timeQueues = new HashMap<>();
+        // Group by minute → occupancy values
+        Map<LocalDateTime, List<Double>> timeOccupancy = new HashMap<>();
+
+        List<Double> allOccupancies = new ArrayList<>();
 
         for (Map<String, Object> data : allData) {
-            if (data.containsKey("timestamp")) {
-                Double queueValue = extractQueueValue(data);
+            if (!data.containsKey("timestamp") || !data.containsKey("occupancy")) {
+                continue;
+            }
 
-                if (queueValue == null) {
-                    continue;
-                }
+            try {
+                double occupancy = ((Number) data.get("occupancy")).doubleValue();
+                allOccupancies.add(occupancy);
 
                 LocalDateTime timestamp = LocalDateTime.parse(
                         data.get("timestamp").toString(),
-                        DateTimeFormatter.ISO_DATE_TIME);
-                LocalDateTime rounded = timestamp.truncatedTo(ChronoUnit.MINUTES);
+                        DateTimeFormatter.ISO_DATE_TIME
+                ).truncatedTo(ChronoUnit.MINUTES);
 
-                timeQueues.computeIfAbsent(rounded, k -> new ArrayList<>()).add(queueValue);
+                timeOccupancy
+                        .computeIfAbsent(timestamp, k -> new ArrayList<>())
+                        .add(occupancy);
+
+            } catch (Exception ignored) {
             }
         }
 
-        // Calculate cumulative sums per timestamp
-        List<Double> cumulativeSums = timeQueues.values().stream()
-                .map(list -> list.stream().mapToDouble(Double::doubleValue).sum())
-                .collect(Collectors.toList());
+        // ---- Average occupancy per timestamp ----
+        List<Double> perTimestampAvgOccupancy = timeOccupancy.values().stream()
+                .map(list -> list.stream()
+                        .mapToDouble(Double::doubleValue)
+                        .average()
+                        .orElse(0.0))
+                .toList();
 
-        if (!cumulativeSums.isEmpty()) {
-            DoubleSummaryStatistics cumulativeStats = cumulativeSums.stream()
-                    .mapToDouble(Double::doubleValue)
-                    .summaryStatistics();
+        if (!perTimestampAvgOccupancy.isEmpty()) {
+            DoubleSummaryStatistics summary =
+                    perTimestampAvgOccupancy.stream()
+                            .mapToDouble(Double::doubleValue)
+                            .summaryStatistics();
 
-            stats.put("averageTotalQueue", cumulativeStats.getAverage());
-            stats.put("maxTotalQueue", cumulativeStats.getMax());
-            stats.put("minTotalQueue", cumulativeStats.getMin());
+            stats.put("averageTotalQueue", summary.getAverage()); // avg occupancy
+            stats.put("maxTotalQueue", summary.getMax());         // peak occupancy
+            stats.put("minTotalQueue", summary.getMin());
+        } else {
+            stats.put("averageTotalQueue", 0.0);
+            stats.put("maxTotalQueue", 0.0);
+            stats.put("minTotalQueue", 0.0);
         }
 
-        // Per-device stats
-        long count = allData.stream()
-                .map(this::extractQueueValue)
-                .filter(Objects::nonNull)
+        // ---- Per-reading stats ----
+        stats.put("averageQueuePerDevice",
+                allOccupancies.stream()
+                        .mapToDouble(Double::doubleValue)
+                        .average()
+                        .orElse(0.0));
+
+        stats.put("totalReadings", allOccupancies.size());
+
+        // =====================================================
+        // ✅ CONGESTION RATE (as per your definition)
+        // Occupancy ≥ 4  ⇒ Wait time ≥ 8 minutes
+        // =====================================================
+        long congestedReadings = allOccupancies.stream()
+                .filter(o -> o >= 4)
                 .count();
 
-        double average = allData.stream()
-                .map(this::extractQueueValue)
-                .filter(Objects::nonNull)
-                .mapToDouble(Double::doubleValue)
-                .average()
-                .orElse(0.0);
+        double congestionRate = allOccupancies.isEmpty()
+                ? 0.0
+                : (congestedReadings * 100.0) / allOccupancies.size();
 
-        stats.put("averageQueuePerDevice", average);
-        stats.put("totalReadings", count);
-
-        double avg = (Double) stats.getOrDefault("averageTotalQueue", 0.0);
-        double max = (Double) stats.getOrDefault("maxTotalQueue", 1.0);
-        stats.put("efficiency", calculateEfficiency(avg, max));
+        stats.put("congestionRate", congestionRate);
 
         return stats;
     }
+
 
     /**
      * Calculate hourly pattern with cumulative data
@@ -1337,159 +1395,147 @@ public class CounterAnalyticsService {
      * Get footfall summary for a specific counter with historical comparisons
      */
     public Map<String, Object> getCounterFootfallSummary(String counterCode) {
-        log.info("Fetching footfall summary for counter: {}", counterCode);
 
-        try {
-            Counter counter = counterRepository.findByCounterCode(counterCode)
-                    .orElseThrow(() -> new IllegalArgumentException("Counter not found: " + counterCode));
+        Counter counter = counterRepository.findByCounterCode(counterCode)
+                .orElseThrow(() -> new IllegalArgumentException("Counter not found"));
 
-            List<Device> devices = deviceRepository.findByCounterId(counter.getId());
+        List<Device> devices = deviceRepository.findByCounterId(counter.getId());
 
-            if (devices.isEmpty()) {
-                log.warn("No devices found for counter: {}", counterCode);
-                return createEmptyFootfallSummary(counterCode);
-            }
+        LocalDateTime now = LocalDateTime.now();
 
-            // Calculate footfall for different time periods
-            LocalDateTime now = LocalDateTime.now();
+        Map<String, Object> today =
+                calculateFootfallForPeriod(
+                        devices,
+                        now.toLocalDate().atStartOfDay(),
+                        now
+                );
 
-            Map<String, Object> today = calculateFootfallForPeriod(
-                    devices, now.toLocalDate().atStartOfDay(), now);
+        Map<String, Object> yesterday =
+                calculateFootfallForPeriod(
+                        devices,
+                        now.minusDays(1).toLocalDate().atStartOfDay(),
+                        now.minusDays(1).toLocalDate().atTime(23,59,59)
+                );
 
-            Map<String, Object> yesterday = calculateFootfallForPeriod(
-                    devices,
-                    now.minusDays(1).toLocalDate().atStartOfDay(),
-                    now.minusDays(1).toLocalDate().atTime(23, 59, 59));
+        Map<String, Object> lastWeek =
+                calculateFootfallForPeriod(
+                        devices,
+                        now.minusWeeks(1).toLocalDate().atStartOfDay(),
+                        now.minusWeeks(1).toLocalDate().atTime(23,59,59)
+                );
 
-            Map<String, Object> lastWeekSameDay = calculateFootfallForPeriod(
-                    devices,
-                    now.minusWeeks(1).toLocalDate().atStartOfDay(),
-                    now.minusWeeks(1).toLocalDate().atTime(23, 59, 59));
+        Map<String, Object> lastMonth =
+                calculateFootfallForPeriod(
+                        devices,
+                        now.minusMonths(1).toLocalDate().atStartOfDay(),
+                        now.minusMonths(1).toLocalDate().atTime(23,59,59)
+                );
 
-            Map<String, Object> lastMonthSameDay = calculateFootfallForPeriod(
-                    devices,
-                    now.minusMonths(1).toLocalDate().atStartOfDay(),
-                    now.minusMonths(1).toLocalDate().atTime(23, 59, 59));
+        Map<String, Object> lastYear =
+                calculateFootfallForPeriod(
+                        devices,
+                        now.minusYears(1).toLocalDate().atStartOfDay(),
+                        now.minusYears(1).toLocalDate().atTime(23,59,59)
+                );
 
-            Map<String, Object> lastYearSameDay = calculateFootfallForPeriod(
-                    devices,
-                    now.minusYears(1).toLocalDate().atStartOfDay(),
-                    now.minusYears(1).toLocalDate().atTime(23, 59, 59));
+        Map<String, Object> response = new HashMap<>();
+        response.put("counterCode", counterCode);
+        response.put("counterName", counter.getCounterName());
+        response.put("generatedAt", now);
 
-            // Calculate percentage changes
-            double todayCount = ((Number) today.get("totalFootfall")).doubleValue();
-            double yesterdayCount = ((Number) yesterday.get("totalFootfall")).doubleValue();
-            double lastWeekCount = ((Number) lastWeekSameDay.get("totalFootfall")).doubleValue();
-            double lastMonthCount = ((Number) lastMonthSameDay.get("totalFootfall")).doubleValue();
-            double lastYearCount = ((Number) lastYearSameDay.get("totalFootfall")).doubleValue();
+        response.put("today", today);
+        response.put("yesterday", yesterday);
+        response.put("lastWeekSameDay", lastWeek);
+        response.put("lastMonthSameDay", lastMonth);
+        response.put("lastYearSameDay", lastYear);
 
-            Map<String, Object> response = new HashMap<>();
-            response.put("counterCode", counterCode);
-            response.put("counterName", counter.getCounterName());
-            response.put("generatedAt", now);
-
-            // Today
-            Map<String, Object> todayData = new HashMap<>();
-            todayData.put("date", now.toLocalDate());
-            todayData.put("count", Math.round(todayCount));
-            todayData.put("percentage", null);
-            response.put("today", todayData);
-
-            // Yesterday
-            Map<String, Object> yesterdayData = new HashMap<>();
-            yesterdayData.put("date", now.minusDays(1).toLocalDate());
-            yesterdayData.put("count", Math.round(yesterdayCount));
-            yesterdayData.put("percentage", calculatePercentageChange(yesterdayCount, todayCount));
-            response.put("yesterday", yesterdayData);
-
-            // Last Week Same Day
-            Map<String, Object> lastWeekData = new HashMap<>();
-            lastWeekData.put("date", now.minusWeeks(1).toLocalDate());
-            lastWeekData.put("count", Math.round(lastWeekCount));
-            lastWeekData.put("percentage", calculatePercentageChange(lastWeekCount, todayCount));
-            response.put("lastWeekSameDay", lastWeekData);
-
-            // Last Month Same Day
-            Map<String, Object> lastMonthData = new HashMap<>();
-            lastMonthData.put("date", now.minusMonths(1).toLocalDate());
-            lastMonthData.put("count", Math.round(lastMonthCount));
-            lastMonthData.put("percentage", calculatePercentageChange(lastMonthCount, todayCount));
-            response.put("lastMonthSameDay", lastMonthData);
-
-            // Last Year Same Day
-            Map<String, Object> lastYearData = new HashMap<>();
-            lastYearData.put("date", now.minusYears(1).toLocalDate());
-            lastYearData.put("count", Math.round(lastYearCount));
-            lastYearData.put("percentage", calculatePercentageChange(lastYearCount, todayCount));
-            response.put("lastYearSameDay", lastYearData);
-
-            log.info("Successfully calculated footfall summary for counter: {}", counterCode);
-            return response;
-
-        } catch (Exception e) {
-            log.error("Error calculating footfall summary: {}", e.getMessage(), e);
-            throw new RuntimeException("Error calculating footfall summary", e);
-        }
+        return response;
     }
+
+
+
+
+    private double getFootfall(Map<String, Object> session) {
+        if (session == null) return 0.0;
+
+        Object value = session.get("totalFootfall");
+        if (value instanceof Number) {
+            return ((Number) value).doubleValue();
+        }
+        return 0.0;
+    }
+
+    private double getDouble(Map<String, Object> map, String key) {
+        Object value = map.get(key);
+        return value instanceof Number ? ((Number) value).doubleValue() : 0.0;
+    }
+
+
+
+
+    private Map<String, LocalTime[]> getSessions() {
+
+        Map<String, LocalTime[]> sessions = new LinkedHashMap<>();
+
+        sessions.put("morning", new LocalTime[]{
+                LocalTime.of(7, 0),
+                LocalTime.of(11, 0)
+        });
+
+        sessions.put("afternoon", new LocalTime[]{
+                LocalTime.of(11, 0),
+                LocalTime.of(15, 0)
+        });
+
+        sessions.put("evening", new LocalTime[]{
+                LocalTime.of(15, 0),
+                LocalTime.of(19, 0)
+        });
+
+        return sessions;
+    }
+
+
 
     /**
      * Get aggregated footfall summary across all active counters
      */
     public Map<String, Object> getAllCountersFootfallSummary() {
-        log.info("Fetching aggregated footfall summary for all counters");
+
+        log.info("Fetching SESSION-based aggregated footfall summary for ALL counters");
 
         try {
             List<Counter> counters = counterRepository.findByActive(true);
 
             if (counters.isEmpty()) {
-                log.warn("No active counters found");
                 return createEmptyFootfallSummary("ALL");
             }
 
-            // Collect all devices from all counters
             List<Device> allDevices = new ArrayList<>();
             for (Counter counter : counters) {
-                List<Device> devices = deviceRepository.findByCounterId(counter.getId());
-                allDevices.addAll(devices);
+                allDevices.addAll(deviceRepository.findByCounterId(counter.getId()));
             }
 
             if (allDevices.isEmpty()) {
-                log.warn("No devices found for any counter");
                 return createEmptyFootfallSummary("ALL");
             }
 
-            // Calculate aggregated footfall for different time periods
             LocalDateTime now = LocalDateTime.now();
 
             Map<String, Object> today = calculateFootfallForPeriod(
-                    allDevices, now.toLocalDate().atStartOfDay(), now);
+                    allDevices,
+                    now.toLocalDate().atStartOfDay(),
+                    now
+            );
 
             Map<String, Object> yesterday = calculateFootfallForPeriod(
                     allDevices,
                     now.minusDays(1).toLocalDate().atStartOfDay(),
-                    now.minusDays(1).toLocalDate().atTime(23, 59, 59));
+                    now.minusDays(1).toLocalDate().atTime(23, 59, 59)
+            );
 
-            Map<String, Object> lastWeekSameDay = calculateFootfallForPeriod(
-                    allDevices,
-                    now.minusWeeks(1).toLocalDate().atStartOfDay(),
-                    now.minusWeeks(1).toLocalDate().atTime(23, 59, 59));
-
-            Map<String, Object> lastMonthSameDay = calculateFootfallForPeriod(
-                    allDevices,
-                    now.minusMonths(1).toLocalDate().atStartOfDay(),
-                    now.minusMonths(1).toLocalDate().atTime(23, 59, 59));
-
-            Map<String, Object> lastYearSameDay = calculateFootfallForPeriod(
-                    allDevices,
-                    now.minusYears(1).toLocalDate().atStartOfDay(),
-                    now.minusYears(1).toLocalDate().atTime(23, 59, 59));
-
-            // Calculate percentage changes
             double todayCount = ((Number) today.get("totalFootfall")).doubleValue();
             double yesterdayCount = ((Number) yesterday.get("totalFootfall")).doubleValue();
-            double lastWeekCount = ((Number) lastWeekSameDay.get("totalFootfall")).doubleValue();
-            double lastMonthCount = ((Number) lastMonthSameDay.get("totalFootfall")).doubleValue();
-            double lastYearCount = ((Number) lastYearSameDay.get("totalFootfall")).doubleValue();
 
             Map<String, Object> response = new HashMap<>();
             response.put("scope", "ALL_COUNTERS");
@@ -1497,50 +1543,26 @@ public class CounterAnalyticsService {
             response.put("totalDevices", allDevices.size());
             response.put("generatedAt", now);
 
-            // Today
-            Map<String, Object> todayData = new HashMap<>();
-            todayData.put("date", now.toLocalDate());
-            todayData.put("count", Math.round(todayCount));
-            todayData.put("percentage", null);
-            response.put("today", todayData);
+            response.put("today", Map.of(
+                    "date", now.toLocalDate(),
+                    "count", Math.round(todayCount),
+                    "percentage", null
+            ));
 
-            // Yesterday
-            Map<String, Object> yesterdayData = new HashMap<>();
-            yesterdayData.put("date", now.minusDays(1).toLocalDate());
-            yesterdayData.put("count", Math.round(yesterdayCount));
-            yesterdayData.put("percentage", calculatePercentageChange(yesterdayCount, todayCount));
-            response.put("yesterday", yesterdayData);
+            response.put("yesterday", Map.of(
+                    "date", now.minusDays(1).toLocalDate(),
+                    "count", Math.round(yesterdayCount),
+                    "percentage", calculatePercentageChange(yesterdayCount, todayCount)
+            ));
 
-            // Last Week Same Day
-            Map<String, Object> lastWeekData = new HashMap<>();
-            lastWeekData.put("date", now.minusWeeks(1).toLocalDate());
-            lastWeekData.put("count", Math.round(lastWeekCount));
-            lastWeekData.put("percentage", calculatePercentageChange(lastWeekCount, todayCount));
-            response.put("lastWeekSameDay", lastWeekData);
-
-            // Last Month Same Day
-            Map<String, Object> lastMonthData = new HashMap<>();
-            lastMonthData.put("date", now.minusMonths(1).toLocalDate());
-            lastMonthData.put("count", Math.round(lastMonthCount));
-            lastMonthData.put("percentage", calculatePercentageChange(lastMonthCount, todayCount));
-            response.put("lastMonthSameDay", lastMonthData);
-
-            // Last Year Same Day
-            Map<String, Object> lastYearData = new HashMap<>();
-            lastYearData.put("date", now.minusYears(1).toLocalDate());
-            lastYearData.put("count", Math.round(lastYearCount));
-            lastYearData.put("percentage", calculatePercentageChange(lastYearCount, todayCount));
-            response.put("lastYearSameDay", lastYearData);
-
-            log.info("Successfully calculated aggregated footfall summary for {} counters",
-                    counters.size());
             return response;
 
         } catch (Exception e) {
-            log.error("Error calculating aggregated footfall summary: {}", e.getMessage(), e);
+            log.error("Error calculating aggregated footfall summary", e);
             throw new RuntimeException("Error calculating aggregated footfall summary", e);
         }
     }
+
 
     /**
      * Calculate footfall (cumulative inCount) for a specific time period
@@ -1550,69 +1572,78 @@ public class CounterAnalyticsService {
             LocalDateTime startTime,
             LocalDateTime endTime) {
 
-        log.debug("Calculating footfall from {} to {}", startTime, endTime);
-
         double totalFootfall = 0.0;
         int devicesWithData = 0;
-        Map<String, Double> deviceFootfalls = new HashMap<>();
+
+        List<Map<String, Object>> trendPoints = new ArrayList<>();
 
         for (Device device : devices) {
             try {
-                String url = String.format("%s/api/mqtt-data/device/%s",
-                        mqttApiBaseUrl, device.getDeviceId());
+                String url = String.format(
+                        "%s/api/mqtt-data/device/%s",
+                        mqttApiBaseUrl,
+                        device.getDeviceId()
+                );
 
-                Map<String, Object> response = restTemplate.getForObject(url, Map.class);
+                Map<String, Object> response =
+                        restTemplate.getForObject(url, Map.class);
 
-                if (response != null && "success".equals(response.get("status")) && response.containsKey("data")) {
-                    Object dataObj = response.get("data");
+                if (response == null || !"success".equals(response.get("status")))
+                    continue;
 
-                    if (dataObj instanceof List) {
-                        @SuppressWarnings("unchecked")
-                        List<Map<String, Object>> deviceData = (List<Map<String, Object>>) dataObj;
+                @SuppressWarnings("unchecked")
+                List<Map<String, Object>> data =
+                        (List<Map<String, Object>>) response.get("data");
 
-                        // Filter by time range and sum inCount values
-                        double deviceTotal = deviceData.stream()
-                                .filter(data -> {
-                                    if (data.containsKey("timestamp")) {
-                                        try {
-                                            LocalDateTime dataTime = LocalDateTime.parse(
-                                                    data.get("timestamp").toString(),
-                                                    DateTimeFormatter.ISO_DATE_TIME);
-                                            return !dataTime.isBefore(startTime) && !dataTime.isAfter(endTime);
-                                        } catch (Exception e) {
-                                            return false;
-                                        }
-                                    }
-                                    return false;
-                                })
-                                .mapToDouble(data -> {
-                                    Double value = extractQueueValue(data);
-                                    return value != null ? value : 0.0;
-                                })
-                                .sum();
+                double deviceMax = 0.0;
 
-                        if (deviceTotal > 0) {
-                            totalFootfall += deviceTotal;
-                            deviceFootfalls.put(device.getDeviceId(), deviceTotal);
-                            devicesWithData++;
-                        }
-                    }
+                for (Map<String, Object> row : data) {
+                    if (!row.containsKey("timestamp")) continue;
+
+                    LocalDateTime time = LocalDateTime.parse(
+                            row.get("timestamp").toString(),
+                            DateTimeFormatter.ISO_DATE_TIME
+                    );
+
+                    if (time.isBefore(startTime) || time.isAfter(endTime))
+                        continue;
+
+                    Double inCount = extractQueueValue(row);
+                    if (inCount == null) continue;
+
+                    // trend point
+                    Map<String, Object> point = new HashMap<>();
+                    point.put("time", time);
+                    point.put("value", inCount);
+                    trendPoints.add(point);
+
+                    deviceMax = Math.max(deviceMax, inCount);
                 }
-            } catch (Exception e) {
-                log.debug("Error fetching data for device {}: {}", device.getDeviceId(), e.getMessage());
-            }
+
+                if (deviceMax > 0) {
+                    totalFootfall += deviceMax;
+                    devicesWithData++;
+                }
+
+            } catch (Exception ignored) {}
         }
 
         Map<String, Object> result = new HashMap<>();
         result.put("totalFootfall", totalFootfall);
         result.put("devicesWithData", devicesWithData);
         result.put("totalDevices", devices.size());
-        result.put("deviceBreakdown", deviceFootfalls);
         result.put("startTime", startTime);
         result.put("endTime", endTime);
+        result.put("trendPoints", trendPoints);
 
         return result;
     }
+
+
+
+
+
+
 
     /**
      * Calculate percentage change between two values
@@ -1680,6 +1711,422 @@ public class CounterAnalyticsService {
         } else {
             return "decreasing";
         }
+    }
+
+    /**
+     * NEW METHOD ADDITION TO CounterAnalyticsService.java
+     * Add this method to your existing CounterAnalyticsService class
+     */
+
+    /**
+     * Get Daily Footfall vs Wait Time Analysis
+     * Analyzes the relationship between foot traffic (inCount) and waiting times
+     * throughout the day with hourly breakdown
+     *
+     * @param counterCode The counter to analyze
+     * @param targetDate The specific date to analyze
+     * @return Map containing hourly breakdown, daily summary, and peak analysis
+     */
+    public Map<String, Object> getDailyFootfallVsWaitTime(
+            String counterCode,
+            LocalDate targetDate) {
+
+        log.info("Fetching daily footfall vs wait time for counter: {} on {}",
+                counterCode, targetDate);
+
+        try {
+            Counter counter = counterRepository.findByCounterCode(counterCode)
+                    .orElseThrow(() -> new IllegalArgumentException("Counter not found: " + counterCode));
+
+            List<Device> devices = deviceRepository.findByCounterId(counter.getId());
+
+            if (devices.isEmpty()) {
+                return createEmptyFootfallWaitTimeResponse(counterCode, counter.getCounterName(), targetDate);
+            }
+
+            LocalDateTime startTime = targetDate.atStartOfDay();
+            LocalDateTime endTime = targetDate.atTime(23, 59, 59);
+
+            // Collect MQTT data for all devices
+            List<Map<String, Object>> allMqttData = new ArrayList<>();
+
+            for (Device device : devices) {
+                try {
+                    String url = String.format("%s/api/mqtt-data/device/%s",
+                            mqttApiBaseUrl, device.getDeviceId());
+
+                    Map<String, Object> response = restTemplate.getForObject(url, Map.class);
+
+                    if (response != null && "success".equals(response.get("status"))
+                            && response.containsKey("data")) {
+
+                        @SuppressWarnings("unchecked")
+                        List<Map<String, Object>> deviceData =
+                                (List<Map<String, Object>>) response.get("data");
+
+                        List<Map<String, Object>> filteredData = deviceData.stream()
+                                .filter(data -> {
+                                    if (data.containsKey("timestamp")) {
+                                        try {
+                                            LocalDateTime dataTime = LocalDateTime.parse(
+                                                    data.get("timestamp").toString(),
+                                                    DateTimeFormatter.ISO_DATE_TIME);
+                                            return !dataTime.isBefore(startTime)
+                                                    && !dataTime.isAfter(endTime);
+                                        } catch (Exception e) {
+                                            return false;
+                                        }
+                                    }
+                                    return false;
+                                })
+                                .collect(Collectors.toList());
+
+                        filteredData.forEach(d -> d.put("deviceId", device.getDeviceId()));
+                        allMqttData.addAll(filteredData);
+                    }
+                } catch (Exception e) {
+                    log.error("Error fetching data for device {}: {}",
+                            device.getDeviceId(), e.getMessage());
+                }
+            }
+
+            if (allMqttData.isEmpty()) {
+                return createEmptyFootfallWaitTimeResponse(counterCode, counter.getCounterName(), targetDate);
+            }
+
+            // Calculate hourly breakdown
+            List<Map<String, Object>> hourlyBreakdown =
+                    calculateHourlyFootfallVsWaitTime(allMqttData, devices.size());
+
+            // Calculate daily summary statistics
+            Map<String, Object> dailySummary =
+                    calculateDailyFootfallWaitTimeSummary(allMqttData, hourlyBreakdown);
+
+            // Identify peak periods
+            Map<String, Object> peakAnalysis =
+                    identifyPeakPeriodsForFootfallWaitTime(hourlyBreakdown);
+
+            // Build response
+            Map<String, Object> result = new HashMap<>();
+            result.put("counterCode", counterCode);
+            result.put("counterName", counter.getCounterName());
+            result.put("counterType", counter.getCounterType());
+            result.put("date", targetDate);
+            result.put("deviceCount", devices.size());
+            result.put("totalDataPoints", allMqttData.size());
+            result.put("hourlyBreakdown", hourlyBreakdown);
+            result.put("dailySummary", dailySummary);
+            result.put("peakAnalysis", peakAnalysis);
+
+            log.info("Successfully calculated footfall vs wait time analysis for {} hours",
+                    hourlyBreakdown.size());
+
+            return result;
+
+        } catch (Exception e) {
+            log.error("Error calculating footfall vs wait time: {}", e.getMessage(), e);
+            throw new RuntimeException("Error calculating footfall vs wait time analysis", e);
+        }
+    }
+
+    /**
+     * Calculate hourly breakdown of footfall and wait time metrics
+     */
+    private List<Map<String, Object>> calculateHourlyFootfallVsWaitTime(
+            List<Map<String, Object>> mqttData,
+            int totalDeviceCount) {
+
+        // Group data by hour
+        Map<Integer, List<Map<String, Object>>> hourlyData = new TreeMap<>();
+
+        for (Map<String, Object> data : mqttData) {
+            if (data.containsKey("timestamp")) {
+                try {
+                    LocalDateTime timestamp = LocalDateTime.parse(
+                            data.get("timestamp").toString(),
+                            DateTimeFormatter.ISO_DATE_TIME);
+                    int hour = timestamp.getHour();
+
+                    hourlyData.computeIfAbsent(hour, k -> new ArrayList<>()).add(data);
+                } catch (Exception e) {
+                    log.debug("Error parsing timestamp: {}", e.getMessage());
+                }
+            }
+        }
+
+        // Calculate metrics for each hour
+        List<Map<String, Object>> hourlyBreakdown = new ArrayList<>();
+
+        for (Map.Entry<Integer, List<Map<String, Object>>> entry : hourlyData.entrySet()) {
+            int hour = entry.getKey();
+            List<Map<String, Object>> hourData = entry.getValue();
+
+            // Extract inCount values (footfall)
+            List<Double> footfallValues = hourData.stream()
+                    .map(this::extractInCount)
+                    .filter(Objects::nonNull)
+                    .collect(Collectors.toList());
+
+            // Extract wait time values
+            List<Double> waitTimeValues = hourData.stream()
+                    .map(this::extractWaitTime)
+                    .filter(Objects::nonNull)
+                    .collect(Collectors.toList());
+
+            if (!footfallValues.isEmpty() || !waitTimeValues.isEmpty()) {
+                DoubleSummaryStatistics footfallStats = footfallValues.stream()
+                        .mapToDouble(Double::doubleValue)
+                        .summaryStatistics();
+
+                DoubleSummaryStatistics waitTimeStats = waitTimeValues.stream()
+                        .mapToDouble(Double::doubleValue)
+                        .summaryStatistics();
+
+                Map<String, Object> hourMetrics = new HashMap<>();
+                hourMetrics.put("hour", hour);
+                hourMetrics.put("hourLabel", String.format("%02d:00 - %02d:00", hour, hour + 1));
+
+                // Footfall metrics
+                hourMetrics.put("totalFootfall", roundToOneDecimal(footfallStats.getSum()));
+                hourMetrics.put("averageFootfall", roundToOneDecimal(footfallStats.getAverage()));
+                hourMetrics.put("peakFootfall", roundToOneDecimal(footfallStats.getMax()));
+                hourMetrics.put("minFootfall", roundToOneDecimal(footfallStats.getMin()));
+
+                // Wait time metrics
+                hourMetrics.put("averageWaitTime", roundToOneDecimal(waitTimeStats.getAverage()));
+                hourMetrics.put("maxWaitTime", roundToOneDecimal(waitTimeStats.getMax()));
+                hourMetrics.put("minWaitTime", roundToOneDecimal(waitTimeStats.getMin()));
+
+                // Correlation metrics
+                double footfallWaitRatio = footfallStats.getAverage() > 0
+                        ? waitTimeStats.getAverage() / footfallStats.getAverage()
+                        : 0.0;
+                hourMetrics.put("footfallWaitRatio", roundToOneDecimal(footfallWaitRatio));
+
+                // Activity level
+                hourMetrics.put("dataPointCount", hourData.size());
+                hourMetrics.put("activeDevices", calculateActiveDevices(hourData));
+
+                hourlyBreakdown.add(hourMetrics);
+            }
+        }
+
+        return hourlyBreakdown;
+    }
+
+    /**
+     * Calculate daily summary statistics
+     */
+    private Map<String, Object> calculateDailyFootfallWaitTimeSummary(
+            List<Map<String, Object>> allData,
+            List<Map<String, Object>> hourlyBreakdown) {
+
+        // Extract all footfall values
+        List<Double> allFootfall = allData.stream()
+                .map(this::extractInCount)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toList());
+
+        // Extract all wait time values
+        List<Double> allWaitTimes = allData.stream()
+                .map(this::extractWaitTime)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toList());
+
+        Map<String, Object> summary = new HashMap<>();
+
+        if (!allFootfall.isEmpty()) {
+            DoubleSummaryStatistics footfallStats = allFootfall.stream()
+                    .mapToDouble(Double::doubleValue)
+                    .summaryStatistics();
+
+            summary.put("totalFootfall", roundToOneDecimal(footfallStats.getSum()));
+            summary.put("averageFootfall", roundToOneDecimal(footfallStats.getAverage()));
+            summary.put("peakFootfall", roundToOneDecimal(footfallStats.getMax()));
+            summary.put("footfallReadings", footfallStats.getCount());
+        }
+
+        if (!allWaitTimes.isEmpty()) {
+            DoubleSummaryStatistics waitTimeStats = allWaitTimes.stream()
+                    .mapToDouble(Double::doubleValue)
+                    .summaryStatistics();
+
+            summary.put("averageWaitTime", roundToOneDecimal(waitTimeStats.getAverage()));
+            summary.put("maxWaitTime", roundToOneDecimal(waitTimeStats.getMax()));
+            summary.put("minWaitTime", roundToOneDecimal(waitTimeStats.getMin()));
+            summary.put("waitTimeReadings", waitTimeStats.getCount());
+
+            // Calculate service level (percentage of readings with acceptable wait time)
+            // Assuming acceptable wait time is <= 5 minutes
+            long acceptableWaitCount = allWaitTimes.stream()
+                    .filter(wt -> wt <= 5.0)
+                    .count();
+            double serviceLevel = (acceptableWaitCount * 100.0) / allWaitTimes.size();
+            summary.put("serviceLevel", roundToOneDecimal(serviceLevel));
+            summary.put("acceptableWaitThreshold", 5.0);
+        }
+
+        // Overall correlation
+        if (!allFootfall.isEmpty() && !allWaitTimes.isEmpty()) {
+            double avgFootfall = allFootfall.stream()
+                    .mapToDouble(Double::doubleValue)
+                    .average()
+                    .orElse(0.0);
+            double avgWaitTime = allWaitTimes.stream()
+                    .mapToDouble(Double::doubleValue)
+                    .average()
+                    .orElse(0.0);
+
+            summary.put("overallFootfallWaitRatio",
+                    avgFootfall > 0 ? roundToOneDecimal(avgWaitTime / avgFootfall) : 0.0);
+        }
+
+        return summary;
+    }
+
+    /**
+     * Identify peak periods for footfall and wait time
+     */
+    private Map<String, Object> identifyPeakPeriodsForFootfallWaitTime(
+            List<Map<String, Object>> hourlyBreakdown) {
+
+        Map<String, Object> peakAnalysis = new HashMap<>();
+
+        if (hourlyBreakdown.isEmpty()) {
+            return peakAnalysis;
+        }
+
+        // Find peak footfall hour
+        Map<String, Object> peakFootfallHour = hourlyBreakdown.stream()
+                .max(Comparator.comparing(h -> ((Number) h.get("totalFootfall")).doubleValue()))
+                .orElse(null);
+
+        if (peakFootfallHour != null) {
+            peakAnalysis.put("peakFootfallHour", Map.of(
+                    "hour", peakFootfallHour.get("hour"),
+                    "hourLabel", peakFootfallHour.get("hourLabel"),
+                    "footfall", peakFootfallHour.get("totalFootfall"),
+                    "waitTime", peakFootfallHour.get("averageWaitTime")
+            ));
+        }
+
+        // Find peak wait time hour
+        Map<String, Object> peakWaitTimeHour = hourlyBreakdown.stream()
+                .max(Comparator.comparing(h -> ((Number) h.get("averageWaitTime")).doubleValue()))
+                .orElse(null);
+
+        if (peakWaitTimeHour != null) {
+            peakAnalysis.put("peakWaitTimeHour", Map.of(
+                    "hour", peakWaitTimeHour.get("hour"),
+                    "hourLabel", peakWaitTimeHour.get("hourLabel"),
+                    "waitTime", peakWaitTimeHour.get("averageWaitTime"),
+                    "footfall", peakWaitTimeHour.get("totalFootfall")
+            ));
+        }
+
+        // Find best performing hour (high footfall, low wait time)
+        Map<String, Object> bestPerformingHour = hourlyBreakdown.stream()
+                .min(Comparator.comparing(h -> {
+                    double footfall = ((Number) h.get("totalFootfall")).doubleValue();
+                    double waitTime = ((Number) h.get("averageWaitTime")).doubleValue();
+                    return footfall > 0 ? waitTime / footfall : Double.MAX_VALUE;
+                }))
+                .orElse(null);
+
+        if (bestPerformingHour != null) {
+            peakAnalysis.put("bestPerformingHour", Map.of(
+                    "hour", bestPerformingHour.get("hour"),
+                    "hourLabel", bestPerformingHour.get("hourLabel"),
+                    "footfall", bestPerformingHour.get("totalFootfall"),
+                    "waitTime", bestPerformingHour.get("averageWaitTime"),
+                    "ratio", bestPerformingHour.get("footfallWaitRatio")
+            ));
+        }
+
+        // Find worst performing hour (high wait time relative to footfall)
+        Map<String, Object> worstPerformingHour = hourlyBreakdown.stream()
+                .max(Comparator.comparing(h -> ((Number) h.get("footfallWaitRatio")).doubleValue()))
+                .orElse(null);
+
+        if (worstPerformingHour != null) {
+            peakAnalysis.put("worstPerformingHour", Map.of(
+                    "hour", worstPerformingHour.get("hour"),
+                    "hourLabel", worstPerformingHour.get("hourLabel"),
+                    "footfall", worstPerformingHour.get("totalFootfall"),
+                    "waitTime", worstPerformingHour.get("averageWaitTime"),
+                    "ratio", worstPerformingHour.get("footfallWaitRatio")
+            ));
+        }
+
+        return peakAnalysis;
+    }
+
+    /**
+     * Extract inCount value from MQTT data
+     */
+    private Double extractInCount(Map<String, Object> data) {
+        if (data.containsKey("inCount")) {
+            Object value = data.get("inCount");
+            if (value instanceof Number) {
+                return ((Number) value).doubleValue();
+            }
+            try {
+                return Double.parseDouble(value.toString());
+            } catch (Exception e) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Extract wait time value from MQTT data
+     */
+    private Double extractWaitTime(Map<String, Object> data) {
+        if (data.containsKey("waitTime")) {
+            Object value = data.get("waitTime");
+            if (value instanceof Number) {
+                return ((Number) value).doubleValue();
+            }
+            try {
+                return Double.parseDouble(value.toString());
+            } catch (Exception e) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Calculate number of active devices in a dataset
+     */
+    private int calculateActiveDevices(List<Map<String, Object>> data) {
+        return (int) data.stream()
+                .map(d -> d.get("deviceId"))
+                .filter(Objects::nonNull)
+                .distinct()
+                .count();
+    }
+
+    /**
+     * Create empty response for footfall vs wait time analysis
+     */
+    private Map<String, Object> createEmptyFootfallWaitTimeResponse(
+            String counterCode,
+            String counterName,
+            LocalDate date) {
+
+        Map<String, Object> response = new HashMap<>();
+        response.put("counterCode", counterCode);
+        response.put("counterName", counterName);
+        response.put("date", date);
+        response.put("deviceCount", 0);
+        response.put("totalDataPoints", 0);
+        response.put("hourlyBreakdown", Collections.emptyList());
+        response.put("dailySummary", Collections.emptyMap());
+        response.put("peakAnalysis", Collections.emptyMap());
+
+        return response;
     }
 
     private List<Integer> findPeakHours(List<Map<String, Object>> hourlyPattern) {

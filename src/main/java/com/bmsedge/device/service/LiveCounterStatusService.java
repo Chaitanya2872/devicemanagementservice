@@ -29,10 +29,11 @@ public class LiveCounterStatusService {
     private final CounterRepository counterRepository;
     private final RestTemplate restTemplate;
 
-    @Value("${mqtt.api.base-url:http://localhost:8090}")
+    @Value("${mqtt.api.base-url}")
     private String mqttApiBaseUrl;
 
     public Map<String, Object> getLiveCounterStatus(String[] counterCodes) {
+
         log.info("Fetching live status");
 
         List<Counter> counters;
@@ -46,12 +47,16 @@ public class LiveCounterStatusService {
         }
 
         List<Map<String, Object>> counterStatuses = new ArrayList<>();
+
         for (Counter counter : counters) {
             try {
                 Map<String, Object> status = getCounterLiveStatus(counter);
-                if (status != null) counterStatuses.add(status);
+                if (status != null) {
+                    counterStatuses.add(status);
+                }
             } catch (Exception e) {
-                log.error("Error for counter {}: {}", counter.getCounterCode(), e.getMessage());
+                log.error("Error fetching live status for counter {}",
+                        counter.getCounterCode(), e);
             }
         }
 
@@ -59,8 +64,10 @@ public class LiveCounterStatusService {
         response.put("timestamp", LocalDateTime.now());
         response.put("counterCount", counterStatuses.size());
         response.put("counters", counterStatuses);
+
         return response;
     }
+
 
     private Map<String, Object> getCounterLiveStatus(Counter counter) {
         List<Device> devices = deviceRepository.findByCounterId(counter.getId());
